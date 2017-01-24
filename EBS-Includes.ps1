@@ -29,7 +29,7 @@ $NBDomain = "TOWERSTUDENTS"
 $server = "PLAsql01"
 $database = "THCLive"
 $querytable = "dbo.THC_ActiveDirectory"
-$querycolumns = "student_id,aos_code,sessiontitle,mobile_phone_no,birth_dt,Forename,surname"
+$querycolumns = "student_id,aos_code,sessiontitle,birth_dt,Forename,surname"
 $year = "2016"
 $grouppath = "OU=Created in $($year),OU=OU Groups,DC=students,DC=tower"
 $OUpath = "OU=Created in $($year),OU=OU Students,DC=students,DC=tower"
@@ -45,7 +45,7 @@ function ebs-newuser ($user) {
 ## grab all the info from a db
 ## create the user
 ## and put them in default groups
-    $uquery = "select distinct forename,surname,birth_dt,mobile_phone_no from $querytable where student_id = '$user'"
+    $uquery = "select distinct forename,surname,birth_dt from $querytable where student_id = '$user'"
     $usqloutput = invoke-sqlcmd -query $uquery -Serverinstance $server -Database $database -Querytimeout 10
     $udesc = $usqloutput.Forename + " " + $usqloutput.surname 
     $udisp = $udesc + " (" + $user + ")"
@@ -63,7 +63,7 @@ function ebs-newuser ($user) {
 
 ## Create the user      
     try {new-aduser -server $domain -Name $user -path $OUPath -description $udesc -displayname $udisp -emailaddress $email -homedirectory $homedir -homedrive "F" `
-            -UserPrincipalName $email -givenname $usqloutput.Forename -surname $usqloutput.surname -mobilephone $usqloutput.mobile_phone_no `
+            -UserPrincipalName $email -givenname $usqloutput.Forename -surname $usqloutput.surname `
             -Accountpassword $uPasswd -Enabled $true -ChangePasswordAtLogon $true -ProfilePath $profiledir
         write-output "OK: User $($user) created."}
     catch {write-output "Failed to create user $($user)."
@@ -140,9 +140,6 @@ function ebs-fixuser ($results) {
               }
         }
 ## now check their home directory for permissions and ownership an dfix if necessary
-
-    
-
     }
     
 function ebs-testgroup($results) {
@@ -207,25 +204,17 @@ function ebs-testuser ($user,$actionarg) {
         ## write-output $eue
         if ( $eue -eq $null ) {
             ## null response = user not found
-            if ($actionarg -eq "create") {
+            if ($actionarg -eq "fix") {
                     ebs-newuser $user
                     write-output "OK: User $($user) created."
                     ebs-fixuser $sqloutput }     
-            else {write-output "Error: Account missing from AD and create not specified. Exiting." 
+            else {write-output "Error: Account missing from AD and Fix not specified. Exiting." 
                    return} }
        else {
             ## the user does exist in AD but may need work.
             ## now perform the action as required
-            if ( $actionarg -eq "fix" ) { 
-                ebs-testuserstate $user $actionarg
-                write-output "Fixing User group membership..."
+                ebs-testuserstate $user "fix"
                 ebs-FixUser $sqloutput 
-                }
-            elseif ($actionarg -eq "create" ) {
-                write-output "Warning: Account $($user) already esists." }
-            else { write-output "Testing user."
-                ebs-testuserstate $user
-                ebs-testgroup $sqloutput }
         }       
     # close and end
     pop-location
@@ -235,6 +224,8 @@ Function ebs-testuserstate ($studentid, $actionarg) {
 # Function to test a user's ou & enabled state
 # and fix it if necessary
 $student = get-aduser $studentid -server "$($domain)" -properties profilepath
+# correct location
+if ((Get-Location) -like "*SQLSERVER*") {set-location "c:\"}
 # check for a profile
 if ($student.profilepath -like "$($ProfileDir)*") { write-output "OK: Student Profile correct"}
 else {write-output "Warning: Profile path wrong."
@@ -256,16 +247,17 @@ else {write-output "Warning: Student in Wrong OU"
         write-output "OK: Student moved OU $($oupath)"}
      }
 # Test/fix directory ownership
-EBS-Testhome $($studentid) $($actionarg)
+EBS-Testhomedir $($studentid) $($actionarg)
 # end of function
 }
 
 function ebs-testhomedir ($studentid, $action) {
-    $fulldir = $basedir + $studentid
+    $fulldir = (get-aduser $studentid -server $domain -properties homedirectory).homedirectory
+   write-output $($fulldir)
 ## test for the folder and create it if necessary)
     if (test-path $fulldir) {$dir = get-item $fulldir }
     else {  
-        if (($action -eq "fix") -or ($action -eq "Create")) {
+        if ($action -eq "fix")  {
             $a = New-Item -itemtype directory -path $fulldir
             write-output "Warning: Created home directory"
             $dir = get-item $fulldir }
@@ -328,57 +320,9 @@ function ebs-testfromdate ($startdate, $actionarg) {
         $userid = $user.student_id
         ebs-testuser $userid $actionarg
     }
-    write-output "`r`n Processed $($users) users." $actionarg
+    write-output "`r`n Processed $($users) users with action $($actionarg)"
     pop-location
 }
-
-
-function ebs-testfromdatefunc ($sqlobject,$actionarg) {
-## wrapper function part of the date / daily check chain
-## tests each user in the SQL query array in turn and sorts them out.
-## NOT USED ANY MORE
-    write-output "Performing action $($actionarg)."
-    foreach ( $user in $sqlobject ) { 
-        $users += 1
-        $userid = $user.student_id
-        ebs-testuser $userid $actionarg
-    }
-}
-
-function ebs-OLDtestfromdatefunc ($sqlobject,$actionarg) {
-## OLD OLD OLD OLD OLD
-## wrapper function part of the date / daily check chain
-## tests each user in the SQL query array in turn and sorts them out.
-## depreciated
-    write-output "Performing action $($actionarg)."
-    foreach ( $user in $sqlobject ) { 
-        $users += 1
-        $userid = $user.student_id
-        $eue = ebs-adtest $userid $actionarg
-        write-output $eue
-        $query = "select $querycolumns from $querytable where student_id = '$userid'"
-        $sqloutput = invoke-sqlcmd -query $query -Serverinstance $server -Database $database -Querytimeout 10
-        if ( $eue -like "OK:*" ) {
-                ## build a new sql object with the course info
-                    ## if fix, fix it
-                        if ( ($actionarg -eq "fix") -or ($actionarg -eq "create") ) 
-                            {ebs-fixuser $sqloutput }
-                        else {ebs-testgroup $sqloutput }
-                    }
-        else {
-        ## if it doesn't exist, test for create then create them
-            if ( $actionarg -contains "create" ) {
-                if ( $eue -like "Warning:*" ) {
-                       ebs-newuser $userid
-                       write-output "OK: User ID $($userid) Created."
-                       ebs-fixuser $sqloutput
-                     }
-            }
-       }
-       }
-    write-output "`r`n Processed $($users) users." $actionarg
-    write-output "`r`n Erros with these users - recheck: " $Errorusers
-    }
 
 
 function ebs-testfromdate2 ($startdate, $actionarg) {
